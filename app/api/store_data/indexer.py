@@ -1,7 +1,8 @@
 import os
 import sys
 import re
-import uuid
+import time
+import hashlib
 from typing import List, Dict, Any, Optional
 
 # Ensure local directory is in sys.path
@@ -65,13 +66,15 @@ def process_passage_strategy_1(
 def build_index(
     passages: List[Dict[str, Any]],
     collection_name: str = "voice_rag",
-    qdrant_url: str = "http://localhost:6333",
+    qdrant_url: Optional[str] = None,
     qdrant_api_key: Optional[str] = None,
     embed_model_name: str = "all-MiniLM-L6-v2"
 ) -> Dict[str, Any]:
     """
     Executes Strategy 1 (Metadata-Aware Passage Indexing) and Strategy 2 (Hybrid Chunking & Qdrant Upsert).
     """
+    qdrant_url = (qdrant_url or os.getenv("QDRANT_URL", "")).rstrip("/")
+    qdrant_api_key = qdrant_api_key or os.getenv("QDRANT_API_KEY")
     print(f"[Indexer] Loading SentenceTransformer model '{embed_model_name}'...")
     model = SentenceTransformer(embed_model_name)
 
@@ -100,7 +103,7 @@ def build_index(
             total_chunks_indexed += 1
 
             # Prepare Qdrant point struct
-            point_id = abs(hash(chunk["chunk_id"])) % (10**12)
+            point_id = int(hashlib.sha256(chunk["chunk_id"].encode("utf-8")).hexdigest(), 16) % (10**12)
             payload = {
                 "chunk_id": chunk["chunk_id"],
                 "text": chunk["text"],
@@ -119,19 +122,26 @@ def build_index(
         if processed_count % 50 == 0 or processed_count == len(passages):
             print(f"  [Indexer Progress] Processed & Embedded {processed_count}/{len(passages)} passages ({total_chunks_indexed} chunks)...", flush=True)
 
-    # Connect to Qdrant Vector Database
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-    local_db_path = os.path.join(project_root, "qdrant_db")
+    # Connect to Qdrant Cloud (cloud-only mode)
+    if not qdrant_url:
+        raise RuntimeError("QDRANT_URL is not set. Add it to .env to connect to Qdrant Cloud.")
 
     client = None
-    try:
-        temp_client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, timeout=3)
-        temp_client.get_collections()
-        client = temp_client
-        print(f"[Indexer] Connected to Qdrant Server at {qdrant_url}")
-    except Exception:
-        print(f"[Indexer] Server unreachable. Using local disk Qdrant database at {local_db_path}")
-        client = QdrantClient(path=local_db_path)
+    last_err = None
+    for attempt in range(2):
+        try:
+            client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key or None, timeout=60)
+            client.get_collections()
+            print(f"[Indexer] Connected to Qdrant Cloud at {qdrant_url}")
+            break
+        except Exception as e:
+            last_err = e
+            client = None
+            if attempt == 0:
+                time.sleep(3)
+
+    if client is None:
+        raise RuntimeError(f"Qdrant Cloud unreachable at {qdrant_url}: {last_err}")
 
     if points:
         vector_dim = len(points[0].vector)
@@ -150,7 +160,15 @@ def build_index(
                 vectors_config=VectorParams(size=vector_dim, distance=Distance.COSINE)
             )
 
-        client.upsert(collection_name=collection_name, points=points)
+        UPSERT_BATCH_SIZE = 256
+        for b_start in range(0, len(points), UPSERT_BATCH_SIZE):
+            client.upsert(
+                collection_name=collection_name,
+                points=points[b_start:b_start + UPSERT_BATCH_SIZE],
+                wait=True
+            )
+            print(f"[Indexer] Upserted batch {b_start // UPSERT_BATCH_SIZE + 1} "
+                  f"({min(b_start + UPSERT_BATCH_SIZE, len(points))}/{len(points)} points)", flush=True)
 
     return {
         "status": "success",

@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from typing import List, Dict, Any, Optional
 
 # Ensure local directory is in sys.path
@@ -15,7 +16,7 @@ def vector_search(
     query_language: Optional[str] = None,
     top_k: int = 5,
     collection_name: str = "voice_rag",
-    qdrant_url: str = "http://localhost:6333",
+    qdrant_url: Optional[str] = None,
     qdrant_api_key: Optional[str] = None,
     embed_model_name: str = "all-MiniLM-L6-v2"
 ) -> Dict[str, Any]:
@@ -23,26 +24,35 @@ def vector_search(
     STRATEGY 2 (Query-Time Vector Search)
     + STRATEGY 3 (Late Chunking Re-Rank)
     """
+    qdrant_url = (qdrant_url or os.getenv("QDRANT_URL", "")).rstrip("/")
+    qdrant_api_key = qdrant_api_key or os.getenv("QDRANT_API_KEY")
+
     print(f"[Retriever] Embedding query: '{query_text}' (Language: {query_language or 'all'})")
     model = SentenceTransformer(embed_model_name)
     query_vector = model.encode(query_text, normalize_embeddings=True).tolist()
 
-    # Connect to Qdrant DB
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-    local_db_path = os.path.join(project_root, "qdrant_db")
+    # Connect to Qdrant Cloud (cloud-only mode)
+    if not qdrant_url:
+        raise RuntimeError("QDRANT_URL is not set. Add it to .env to connect to Qdrant Cloud.")
 
     client = None
-    try:
-        temp_client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, timeout=3)
-        existing_cols = [c.name for c in temp_client.get_collections().collections]
-        if collection_name in existing_cols:
+    last_err = None
+    for attempt in range(2):
+        try:
+            temp_client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key or None, timeout=15)
+            existing_cols = [c.name for c in temp_client.get_collections().collections]
+            if collection_name not in existing_cols:
+                raise ValueError(f"Collection '{collection_name}' not found on Qdrant Cloud")
             client = temp_client
-            print(f"[Retriever] Connected to Qdrant Server at {qdrant_url}")
-        else:
-            raise ValueError(f"Collection '{collection_name}' not on remote server")
-    except Exception:
-        print(f"[Retriever] Querying local disk Qdrant database at {local_db_path}")
-        client = QdrantClient(path=local_db_path)
+            print(f"[Retriever] Connected to Qdrant Cloud at {qdrant_url}")
+            break
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                time.sleep(3)
+
+    if client is None:
+        raise RuntimeError(f"Qdrant Cloud unreachable at {qdrant_url}: {last_err}")
 
     lang_filter = None
     if query_language and query_language != "all":

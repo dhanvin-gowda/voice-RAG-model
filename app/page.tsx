@@ -12,23 +12,37 @@ import {
   Check,
   Loader2,
   Radio,
-  ExternalLink,
   Layers,
   AlertCircle,
   Volume2,
   VolumeX,
   ShieldCheck,
   ShieldAlert,
-  Binary,
   FileText,
 } from "lucide-react";
 
 type AppStatus = "idle" | "listening" | "processing" | "complete" | "error";
 
+interface QdrantDocPayload {
+  Eng_Answer?: string;
+  Answer?: string;
+  passage?: string;
+  text?: string;
+  content?: string;
+  chunk?: string;
+  [key: string]: unknown;
+}
+
+interface QdrantDoc {
+  id?: string | number;
+  score?: number;
+  payload?: QdrantDocPayload;
+}
+
 interface PipelineData {
   transcript?: string;
   embeddingDimensions?: number;
-  retrievedDocs?: any[];
+  retrievedDocs?: QdrantDoc[];
   guardrailResult?: {
     allowed: boolean;
     harmDetected: boolean;
@@ -63,9 +77,15 @@ export default function VoiceRAGPage() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  const stopMediaStream = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+  };
+
   useEffect(() => {
     if (status === "listening") {
-      setRecTime(0);
       timerIntervalRef.current = setInterval(() => {
         setRecTime((prev) => prev + 1);
       }, 1000);
@@ -88,17 +108,11 @@ export default function VoiceRAGPage() {
     };
   }, []);
 
-  const stopMediaStream = () => {
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-      mediaStreamRef.current = null;
-    }
-  };
-
   const startRecording = async () => {
     try {
       setErrorMessage("");
       setPipelineData(null);
+      setRecTime(0);
       audioChunksRef.current = [];
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -125,7 +139,7 @@ export default function VoiceRAGPage() {
       mediaRecorder.start(100);
       setStatus("listening");
       setPipelineStep(1);
-    } catch (err: any) {
+    } catch {
       setErrorMessage("Could not access microphone. Please allow microphone permissions.");
       setStatus("error");
     }
@@ -180,10 +194,12 @@ export default function VoiceRAGPage() {
         body: sttFormData,
       });
 
-      let sttData: any = {};
+      let sttData: { transcript?: string; error?: string } = {};
       try {
         sttData = await sttRes.json();
-      } catch (e) {}
+      } catch {
+        // ignore json parse error
+      }
 
       if (!sttRes.ok) {
         throw new Error(sttData.error || `Failed to transcribe audio (${sttRes.status}).`);
@@ -205,10 +221,10 @@ export default function VoiceRAGPage() {
 
       setPipelineStep(3);
 
-      let data: any = {};
+      let data: PipelineData & { error?: string; details?: string } = {};
       try {
         data = await pipelineRes.json();
-      } catch (parseErr) {
+      } catch {
         if (!pipelineRes.ok) {
           throw new Error(`Server returned ${pipelineRes.status}: ${pipelineRes.statusText}`);
         }
@@ -228,13 +244,17 @@ export default function VoiceRAGPage() {
             audioRef.current.src = data.audioUrl;
             audioRef.current.play().then(() => setIsPlayingAudio(true)).catch(() => {});
           }
-        } catch (e) {}
+        } catch {
+          // ignore playback errors
+        }
       }
-    } catch (err: any) {
-      setErrorMessage(err.message || "Error processing voice query through pipeline.");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Error processing voice query through pipeline.";
+      setErrorMessage(msg);
       setStatus("error");
     }
   };
+
 
   const togglePlayAudio = () => {
     if (!audioRef.current || !pipelineData?.audioUrl) return;
@@ -242,7 +262,7 @@ export default function VoiceRAGPage() {
       audioRef.current.pause();
       setIsPlayingAudio(false);
     } else {
-      audioRef.current.play().then(() => setIsPlayingAudio(true)).catch(() => {});
+      audioRef.current.play().then(() => setIsPlayingAudio(true)).catch(() => { });
     }
   };
 
@@ -318,11 +338,10 @@ export default function VoiceRAGPage() {
           )}
 
           {status === "complete" && (
-            <div className={`px-3.5 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 shadow-2xs border ${
-              harmDetected
-                ? "bg-amber-50 text-amber-800 border-amber-200"
-                : "bg-emerald-50 text-emerald-700 border-emerald-200"
-            }`}>
+            <div className={`px-3.5 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 shadow-2xs border ${harmDetected
+              ? "bg-amber-50 text-amber-800 border-amber-200"
+              : "bg-emerald-50 text-emerald-700 border-emerald-200"
+              }`}>
               {harmDetected ? (
                 <>
                   <ShieldAlert className="w-3.5 h-3.5 text-amber-600" />
@@ -372,9 +391,8 @@ export default function VoiceRAGPage() {
               {EQUALIZER_BARS.map((h, i) => (
                 <div
                   key={i}
-                  className={`w-1 rounded-full bg-indigo-600 transition-all duration-300 ${
-                    status === "listening" ? "animate-equalizer" : "opacity-40"
-                  }`}
+                  className={`w-1 rounded-full bg-indigo-600 transition-all duration-300 ${status === "listening" ? "animate-equalizer" : "opacity-40"
+                    }`}
                   style={{
                     height: status === "listening" ? `${h}px` : "12px",
                     animationDelay: `${(i % 5) * 0.15}s`,
@@ -386,20 +404,18 @@ export default function VoiceRAGPage() {
             {/* Record / Stop Button */}
             <div className="relative flex items-center justify-center my-3">
               <div
-                className={`w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300 ${
-                  status === "listening"
-                    ? "bg-rose-100 animate-pulse-ring"
-                    : "bg-slate-100"
-                }`}
+                className={`w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300 ${status === "listening"
+                  ? "bg-rose-100 animate-pulse-ring"
+                  : "bg-slate-100"
+                  }`}
               >
                 <button
                   onClick={handleRecordToggle}
                   disabled={status === "processing"}
-                  className={`w-12 h-12 rounded-full flex items-center justify-center text-white shadow-md transition-all active:scale-95 cursor-pointer disabled:opacity-50 ${
-                    status === "listening"
-                      ? "bg-rose-500 hover:bg-rose-600 shadow-rose-500/30"
-                      : "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-500/30"
-                  }`}
+                  className={`w-12 h-12 rounded-full flex items-center justify-center text-white shadow-md transition-all active:scale-95 cursor-pointer disabled:opacity-50 ${status === "listening"
+                    ? "bg-rose-500 hover:bg-rose-600 shadow-rose-500/30"
+                    : "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-500/30"
+                    }`}
                 >
                   {status === "listening" ? (
                     <Square className="w-5 h-5 fill-white" />
@@ -472,8 +488,8 @@ export default function VoiceRAGPage() {
             <div className="space-y-2">
               <PipelineStepItem
                 stepNumber={1}
-                title="1. Sarvam Voice STT"
-                subtitle="Transcribe speech audio file"
+                title="Sarvam Voice STT"
+                subtitle=""
                 isActive={pipelineStep === 1 && status === "processing"}
                 isCompleted={pipelineStep > 1 || status === "complete"}
                 isCurrentInRecording={status === "listening" && pipelineStep === 1}
@@ -482,7 +498,7 @@ export default function VoiceRAGPage() {
               <PipelineStepItem
                 stepNumber={2}
                 title="2. Python Vector Embedding"
-                subtitle="SentenceTransformers (384/768 dimensions)"
+                subtitle=""
                 isActive={pipelineStep === 2 && status === "processing"}
                 isCompleted={pipelineStep > 2 || status === "complete"}
               />
@@ -490,7 +506,7 @@ export default function VoiceRAGPage() {
               <PipelineStepItem
                 stepNumber={3}
                 title="3. Qdrant Vector Retrieval"
-                subtitle="Cosine vector similarity search"
+                subtitle=""
                 isActive={pipelineStep === 3 && status === "processing"}
                 isCompleted={pipelineStep > 3 || status === "complete"}
               />
@@ -498,7 +514,7 @@ export default function VoiceRAGPage() {
               <PipelineStepItem
                 stepNumber={4}
                 title="4. AI Guardrail Harm Filter"
-                subtitle="Harm detection & content sanitization"
+                subtitle=""
                 isActive={pipelineStep === 4 && status === "processing"}
                 isCompleted={pipelineStep > 4 || status === "complete"}
               />
@@ -506,7 +522,7 @@ export default function VoiceRAGPage() {
               <PipelineStepItem
                 stepNumber={5}
                 title="5. Sarvam Text-To-Speech (TTS)"
-                subtitle="Generate speech audio response"
+                subtitle=""
                 isActive={pipelineStep === 5 && status === "processing"}
                 isCompleted={status === "complete"}
               />
@@ -548,8 +564,9 @@ export default function VoiceRAGPage() {
                   </div>
                 ) : pipelineData?.retrievedDocs && pipelineData.retrievedDocs.length > 0 ? (
                   <div className="space-y-3 max-h-[320px] overflow-y-auto pr-1">
-                    {pipelineData.retrievedDocs.map((doc: any, index: number) => {
+                    {pipelineData.retrievedDocs.map((doc: QdrantDoc, index: number) => {
                       const score = doc.score ? (doc.score * 100).toFixed(1) : "82.5";
+
                       const payload = doc.payload || {};
                       const rawSnippet =
                         (payload.Eng_Answer && payload.Eng_Answer !== "No Answer Present." ? payload.Eng_Answer : null) ||
@@ -566,11 +583,10 @@ export default function VoiceRAGPage() {
                       return (
                         <div
                           key={index}
-                          className={`rounded-xl p-3.5 border transition-all ${
-                            isTopMatch
-                              ? "bg-indigo-50/70 border-indigo-200/90 shadow-2xs"
-                              : "bg-slate-50 border-slate-200/70"
-                          }`}
+                          className={`rounded-xl p-3.5 border transition-all ${isTopMatch
+                            ? "bg-indigo-50/70 border-indigo-200/90 shadow-2xs"
+                            : "bg-slate-50 border-slate-200/70"
+                            }`}
                         >
                           <div className="flex items-center justify-between gap-2 mb-1.5">
                             <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
@@ -652,11 +668,10 @@ export default function VoiceRAGPage() {
 
                 {/* Guardrail Status Card */}
                 <div
-                  className={`p-3.5 rounded-xl border text-xs font-sans ${
-                    harmDetected
-                      ? "bg-amber-50/90 border-amber-200 text-amber-900"
-                      : "bg-emerald-50/90 border-emerald-200 text-emerald-900"
-                  }`}
+                  className={`p-3.5 rounded-xl border text-xs font-sans ${harmDetected
+                    ? "bg-amber-50/90 border-amber-200 text-amber-900"
+                    : "bg-emerald-50/90 border-emerald-200 text-emerald-900"
+                    }`}
                 >
                   <div className="flex items-center gap-2 font-bold mb-1">
                     {harmDetected ? (
@@ -730,11 +745,10 @@ function PipelineStepItem({
 
   return (
     <div
-      className={`flex items-center gap-3 p-2.5 rounded-xl transition-all duration-300 ${
-        highlighted
-          ? "bg-indigo-50/90 border border-indigo-200/80 shadow-2xs"
-          : "bg-transparent border border-transparent hover:bg-slate-50/50"
-      }`}
+      className={`flex items-center gap-3 p-2.5 rounded-xl transition-all duration-300 ${highlighted
+        ? "bg-indigo-50/90 border border-indigo-200/80 shadow-2xs"
+        : "bg-transparent border border-transparent hover:bg-slate-50/50"
+        }`}
     >
       <div className="shrink-0">
         {isCompleted ? (
@@ -754,24 +768,22 @@ function PipelineStepItem({
 
       <div className="flex-1 min-w-0">
         <h5
-          className={`text-xs font-bold leading-none mb-1 ${
-            highlighted
-              ? "text-indigo-900"
-              : isCompleted
-                ? "text-slate-800"
-                : "text-slate-400"
-          }`}
+          className={`text-xs font-bold leading-none mb-1 ${highlighted
+            ? "text-indigo-900"
+            : isCompleted
+              ? "text-slate-800"
+              : "text-slate-400"
+            }`}
         >
           {title}
         </h5>
         <p
-          className={`text-[11px] font-mono leading-none truncate ${
-            highlighted
-              ? "text-indigo-600/90 font-medium"
-              : isCompleted
-                ? "text-slate-400"
-                : "text-slate-400/80"
-          }`}
+          className={`text-[11px] font-mono leading-none truncate ${highlighted
+            ? "text-indigo-600/90 font-medium"
+            : isCompleted
+              ? "text-slate-400"
+              : "text-slate-400/80"
+            }`}
         >
           {subtitle}
         </p>

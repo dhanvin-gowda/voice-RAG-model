@@ -1,26 +1,65 @@
 import { NextResponse } from "next/server";
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import path from "path";
 
 export interface QdrantSearchResult {
   id: string | number;
   score: number;
-  payload?: Record<string, any>;
+  payload?: Record<string, unknown>;
 }
 
-function searchLocalQdrant(
+let serviceStarting = false;
+
+function ensureDaemonRunning() {
+  if (serviceStarting) return;
+  serviceStarting = true;
+  const servicePath = path.join(process.cwd(), "app", "api", "store_data", "qdrant_service.py");
+  try {
+    const child = spawn("python", [servicePath], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+  } catch {
+    serviceStarting = false;
+  }
+}
+
+async function searchLocalQdrant(
   query: string | number[],
   limit: number,
   collection: string
 ): Promise<QdrantSearchResult[]> {
+  const payload = typeof query === "string" ? { text: query, limit, collection } : { vector: query, limit, collection };
+
+  // 1. Ultra-fast HTTP Daemon query (~30ms)
+  try {
+    const res = await fetch("http://127.0.0.1:5005/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        return data;
+      }
+    }
+  } catch {
+    // Service not running yet, auto-spawn background daemon for subsequent queries
+    ensureDaemonRunning();
+  }
+
+  // 2. Cold-start Process Fallback
   return new Promise((resolve) => {
     const scriptPath = path.join(process.cwd(), "app", "api", "store_data", "query_qdrant.py");
-    const payload = typeof query === "string" ? { text: query, limit, collection } : { vector: query, limit, collection };
+    const b64Payload = Buffer.from(JSON.stringify(payload)).toString("base64");
 
-    const child = execFile(
+    execFile(
       "python",
-      [scriptPath],
-      { maxBuffer: 10 * 1024 * 1024, timeout: 30000 },
+      [scriptPath, b64Payload],
+      { maxBuffer: 10 * 1024 * 1024, timeout: 45000, encoding: "utf-8" },
       (error, stdout) => {
         if (error) {
           return resolve([]);
@@ -30,17 +69,16 @@ function searchLocalQdrant(
           if (Array.isArray(results)) {
             return resolve(results);
           }
-        } catch (e) {}
+        } catch {
+          // ignore parse errors
+        }
         resolve([]);
       }
     );
-
-    if (child.stdin) {
-      child.stdin.write(JSON.stringify(payload));
-      child.stdin.end();
-    }
   });
 }
+
+
 
 export async function search(
   query: string | number[],
@@ -72,10 +110,12 @@ export async function POST(request: Request) {
       count: results.length,
       results,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Failed to execute Qdrant vector search.";
     return NextResponse.json(
-      { error: error.message || "Failed to execute Qdrant vector search." },
+      { error: errorMessage },
       { status: 500 }
     );
   }
 }
+
