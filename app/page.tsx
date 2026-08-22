@@ -315,9 +315,7 @@ export default function VoiceRAGPage() {
             <h1 className="text-xl font-bold tracking-tight text-slate-900">
               Voice RAG System
             </h1>
-            <span className="bg-indigo-50 text-indigo-700 text-xs font-mono font-medium px-2.5 py-0.5 rounded-full border border-indigo-200/80">
-              Sarvam STT • Python Embed • Qdrant • Guardrail • Sarvam TTS
-            </span>
+           
           </div>
         </div>
 
