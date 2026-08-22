@@ -28,7 +28,7 @@ from qdrant_client.models import VectorParams, Distance, PointStruct
 GEMINI_MODEL = "gemini-embedding-001"
 GEMINI_OUTPUT_DIM = 768
 GEMINI_BATCH_SIZE = 100
-MAX_RETRIES = 6
+MAX_RETRIES = 8
 
 
 def gemini_embed_batch(texts, api_key, task_type="RETRIEVAL_DOCUMENT"):
@@ -63,7 +63,7 @@ def gemini_embed_batch(texts, api_key, task_type="RETRIEVAL_DOCUMENT"):
             err_body = e.read().decode("utf-8", errors="replace")
             last_error = f"HTTP {e.code}: {err_body[:300]}"
             if e.code in (429, 500, 503):
-                wait = min(2 ** attempt * 2, 60)
+                wait = min(2 ** attempt * 5, 120)
                 print(f"[WARN] Gemini API {e.code}, retrying in {wait}s (attempt {attempt + 1}/{MAX_RETRIES})")
                 time.sleep(wait)
                 continue
@@ -100,6 +100,7 @@ def ingest_dataset(limit=5000):
     rows = table.to_pylist()
 
     passages = []
+    seen_queries = set()
     for row in rows:
         if len(passages) >= limit:
             break
@@ -117,6 +118,11 @@ def ingest_dataset(limit=5000):
 
         if not best_query or not best_answer:
             continue
+
+        dedupe_key = best_query.lower()
+        if dedupe_key in seen_queries:
+            continue
+        seen_queries.add(dedupe_key)
 
         passages.append({
             "id": f"doc_{len(passages)+1}",
@@ -136,35 +142,6 @@ def ingest_dataset(limit=5000):
         print("No passages found.")
         return
 
-    embeddings = []
-    embed_start = time.time()
-    total_batches = (len(passages) + GEMINI_BATCH_SIZE - 1) // GEMINI_BATCH_SIZE
-    for b_start in range(0, len(passages), GEMINI_BATCH_SIZE):
-        batch_texts = [p["passage"] for p in passages[b_start:b_start + GEMINI_BATCH_SIZE]]
-        batch_vecs = gemini_embed_batch(batch_texts, api_key)
-        embeddings.extend(batch_vecs)
-        done = len(embeddings)
-        elapsed = time.time() - embed_start
-        print(f"[Embed] {done}/{len(passages)} embedded ({total_batches} batches, {elapsed:.1f}s elapsed)")
-
-    vector_dim = len(embeddings[0])
-    print(f"[OK] Embedding complete. Vector dimension: {vector_dim}")
-
-    points = []
-    for idx, (p, emb) in enumerate(zip(passages, embeddings), start=1):
-        payload = {
-            "chunk_id": p["id"],
-            "text": p["text"],
-            "passage": p["passage"],
-            "query": p["query"],
-            "Eng_Query": p["Eng_Query"],
-            "Eng_Answer": p["Eng_Answer"],
-            "Answer": p["Answer"],
-            "language": p["language"],
-            "embed_model": GEMINI_MODEL,
-        }
-        points.append(PointStruct(id=idx, vector=emb, payload=payload))
-
     qdrant_url = (os.getenv("QDRANT_URL") or "").rstrip("/")
     qdrant_api_key = os.getenv("QDRANT_API_KEY", "")
 
@@ -181,25 +158,81 @@ def ingest_dataset(limit=5000):
             if hasattr(col_info.config.params.vectors, 'size')
             else None
         )
-        if current_dim and current_dim != vector_dim:
-            print(f"[Index] Collection '{collection_name}' has dim {current_dim}, recreating with dim {vector_dim}...")
+        if current_dim and current_dim != GEMINI_OUTPUT_DIM:
+            print(f"[Index] Collection '{collection_name}' has dim {current_dim}, recreating with dim {GEMINI_OUTPUT_DIM}...")
             client.delete_collection(collection_name)
             existing_cols.remove(collection_name)
 
     if collection_name not in existing_cols:
         client.create_collection(
             collection_name=collection_name,
-            vectors_config=VectorParams(size=vector_dim, distance=Distance.COSINE),
+            vectors_config=VectorParams(size=GEMINI_OUTPUT_DIM, distance=Distance.COSINE),
         )
 
-    upsert_batch = 500
-    for b_start in range(0, len(points), upsert_batch):
-        client.upsert(collection_name=collection_name, points=points[b_start:b_start + upsert_batch])
-        print(f"[Upsert] {min(b_start + upsert_batch, len(points))}/{len(points)} points")
+    # Resume support: fetch chunk_ids already stored so an interrupted
+    # run skips them instead of re-embedding everything.
+    ingested_ids = set()
+    offset = None
+    while True:
+        records, offset = client.scroll(
+            collection_name=collection_name,
+            limit=256,
+            offset=offset,
+            with_payload=["chunk_id"],
+            with_vectors=False,
+        )
+        for rec in records:
+            cid = (rec.payload or {}).get("chunk_id")
+            if cid:
+                ingested_ids.add(cid)
+        if offset is None:
+            break
+
+    if ingested_ids:
+        print(f"[Resume] Found {len(ingested_ids)} already-ingested points; skipping them.")
+
+    pending = [p for p in passages if p["id"] not in ingested_ids]
+    skipped = len(passages) - len(pending)
+    if not pending:
+        print("[OK] Nothing new to ingest. Knowledge base is already up to date.")
+        return
+
+    total_batches = (len(pending) + GEMINI_BATCH_SIZE - 1) // GEMINI_BATCH_SIZE
+    ingest_start = time.time()
+    ingested_now = 0
+
+    for batch_idx, b_start in enumerate(range(0, len(pending), GEMINI_BATCH_SIZE), start=1):
+        batch = pending[b_start:b_start + GEMINI_BATCH_SIZE]
+        batch_vecs = gemini_embed_batch([p["passage"] for p in batch], api_key)
+
+        # Upsert immediately so progress survives interruptions;
+        # the resume check skips these on any rerun.
+        points = []
+        for p, emb in zip(batch, batch_vecs):
+            numeric_id = int(str(p["id"]).split("_")[1])
+            payload = {
+                "chunk_id": p["id"],
+                "text": p["text"],
+                "passage": p["passage"],
+                "query": p["query"],
+                "Eng_Query": p["Eng_Query"],
+                "Eng_Answer": p["Eng_Answer"],
+                "Answer": p["Answer"],
+                "language": p["language"],
+                "embed_model": GEMINI_MODEL,
+            }
+            points.append(PointStruct(id=numeric_id, vector=emb, payload=payload))
+        client.upsert(collection_name=collection_name, points=points)
+
+        ingested_now += len(batch)
+        elapsed = time.time() - ingest_start
+        print(f"[Ingest] {ingested_now}/{len(pending)} upserted (batch {batch_idx}/{total_batches}, {elapsed:.0f}s elapsed)")
+        if b_start + GEMINI_BATCH_SIZE < len(pending):
+            time.sleep(2)
 
     count = client.count(collection_name=collection_name, exact=True).count
     print("=" * 65)
-    print(f"SUCCESS: Ingested {len(points)} Q&A knowledge points into Qdrant Cloud ('{collection_name}', now {count} total).")
+    print(f"SUCCESS: Ingested {ingested_now} new Q&A knowledge points into Qdrant Cloud ('{collection_name}', now {count} total, {skipped} skipped as already present).")
     print("=" * 65)
 
 

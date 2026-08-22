@@ -43,6 +43,7 @@ interface PipelineData {
   transcript?: string;
   embeddingDimensions?: number;
   retrievedDocs?: QdrantDoc[];
+  retrievalError?: string | null;
   guardrailResult?: {
     allowed: boolean;
     harmDetected: boolean;
@@ -608,10 +609,14 @@ export default function VoiceRAGPage() {
                   <div className="bg-amber-50/80 rounded-xl p-4 border border-amber-200 text-xs text-amber-900">
                     <p className="font-semibold mb-1 flex items-center gap-1.5">
                       <AlertCircle className="w-4 h-4 text-amber-600" />
-                      No Qdrant Document Match Found
+                      {pipelineData?.retrievalError
+                        ? "Knowledge Base Search Unavailable"
+                        : "No Qdrant Document Match Found"}
                     </p>
                     <p>
-                      No document in the knowledge base matched your query.
+                      {pipelineData?.retrievalError
+                        ? `Retrieval failed and no answer was generated. Error: ${pipelineData.retrievalError}`
+                        : "No document in the knowledge base matched your query."}
                     </p>
                   </div>
                 )}
