@@ -1,14 +1,28 @@
 import { NextResponse } from "next/server";
 
 const EMBEDDING_MODELS = [
-  "text-embedding-004",
   "gemini-embedding-001",
+  "text-embedding-004",
   "embedding-001",
 ];
 
-export async function sendEmbedding(text: string): Promise<number[]>;
-export async function sendEmbedding(text: string[]): Promise<number[][]>;
-export async function sendEmbedding(text: string | string[]): Promise<number[] | number[][]> {
+const EMBEDDING_OUTPUT_DIMENSIONALITY = 768;
+
+function embeddingConfig(taskType?: EmbedTaskType) {
+  return {
+    ...(taskType ? { taskType } : {}),
+    outputDimensionality: EMBEDDING_OUTPUT_DIMENSIONALITY,
+  };
+}
+
+export type EmbedTaskType = "RETRIEVAL_QUERY" | "RETRIEVAL_DOCUMENT";
+
+export async function sendEmbedding(text: string, taskType?: EmbedTaskType): Promise<number[]>;
+export async function sendEmbedding(text: string[], taskType?: EmbedTaskType): Promise<number[][]>;
+export async function sendEmbedding(
+  text: string | string[],
+  taskType?: EmbedTaskType
+): Promise<number[] | number[][]> {
   const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === "your_google_api_key_here") {
     throw new Error("GOOGLE_API_KEY (or GEMINI_API_KEY) is missing or not configured in .env");
@@ -20,9 +34,11 @@ export async function sendEmbedding(text: string | string[]): Promise<number[] |
     try {
       if (Array.isArray(text)) {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:batchEmbedContents?key=${apiKey}`;
+        const config = embeddingConfig(taskType);
         const requests = text.map((t) => ({
           model: `models/${model}`,
           content: { parts: [{ text: t }] },
+          ...config,
         }));
 
         const response = await fetch(url, {
@@ -46,6 +62,7 @@ export async function sendEmbedding(text: string | string[]): Promise<number[] |
           body: JSON.stringify({
             model: `models/${model}`,
             content: { parts: [{ text }] },
+            ...embeddingConfig(taskType),
           }),
         });
 
