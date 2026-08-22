@@ -14,7 +14,7 @@ export async function sendEmbedding(text: string | string[]): Promise<number[] |
     throw new Error("GOOGLE_API_KEY (or GEMINI_API_KEY) is missing or not configured in .env");
   }
 
-  let lastError: any = null;
+  let lastError: Error | null = null;
 
   for (const model of EMBEDDING_MODELS) {
     try {
@@ -57,12 +57,12 @@ export async function sendEmbedding(text: string | string[]): Promise<number[] |
         const data = await response.json();
         return data.embedding.values;
       }
-    } catch (err: any) {
-      lastError = err;
+    } catch (err: unknown) {
+      lastError = err instanceof Error ? err : new Error(String(err));
     }
   }
 
-  throw new Error(`All Google Embedding models failed. Last error: ${lastError?.message || lastError}`);
+  throw new Error(`All Google Embedding models failed. Last error: ${lastError?.message || String(lastError)}`);
 }
 
 export async function POST(request: Request) {
@@ -79,10 +79,12 @@ export async function POST(request: Request) {
 
     const embedding = await sendEmbedding(text);
     return NextResponse.json({ embedding });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Failed to generate Google embedding.";
     return NextResponse.json(
-      { error: error.message || "Failed to generate Google embedding." },
+      { error: errorMessage },
       { status: 500 }
     );
   }
 }
+

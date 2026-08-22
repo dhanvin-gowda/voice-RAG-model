@@ -61,10 +61,12 @@ export async function POST(request: Request) {
 
     const result = await guardrail(inputData);
     return NextResponse.json(result);
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Failed to process guardrail evaluation.";
     return NextResponse.json(
-      { error: error.message || "Failed to process guardrail evaluation." },
+      { error: errorMessage },
       { status: 500 }
     );
   }
 }
+

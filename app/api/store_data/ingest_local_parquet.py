@@ -90,9 +90,7 @@ def ingest_local(limit=1000):
     try:
         index_result = build_index(
             passages=passages,
-            collection_name="voice_rag",
-            qdrant_url="http://localhost:6333",
-            qdrant_api_key=""
+            collection_name="voice_rag"
         )
         index_time = time.time() - index_start
         print(f"\n[OK] Indexed {index_result['processed_passages']} passages into {index_result['total_chunks_indexed']} chunks.")

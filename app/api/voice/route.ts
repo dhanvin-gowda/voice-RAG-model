@@ -37,7 +37,7 @@ export async function POST(request: Request) {
     sarvamFormData.append("model", "saaras:v3");
     sarvamFormData.append("mode", "transcribe");
 
-    let response = await fetch("https://api.sarvam.ai/speech-to-text", {
+    const response = await fetch("https://api.sarvam.ai/speech-to-text", {
       method: "POST",
       headers: {
         "api-subscription-key": apiKey,
@@ -75,7 +75,9 @@ export async function POST(request: Request) {
         if (parsed?.error?.message) {
           parsedErrorMessage = parsed.error.message;
         }
-      } catch (e) {}
+      } catch {
+        // ignore JSON parse error
+      }
 
       return NextResponse.json(
         { error: parsedErrorMessage || `Sarvam STT API returned ${response.status}` },
@@ -88,10 +90,12 @@ export async function POST(request: Request) {
       transcript: data.transcript || data.transcripted_text || "",
       language_code: data.language_code || "",
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Failed to process audio transcription.";
     return NextResponse.json(
-      { error: error.message || "Failed to process audio transcription." },
+      { error: errorMessage },
       { status: 500 }
     );
   }
 }
+

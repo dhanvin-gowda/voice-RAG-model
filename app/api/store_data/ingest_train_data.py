@@ -13,22 +13,18 @@ from qdrant_client.models import VectorParams, Distance, PointStruct
 # Project Root and .env setup
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 train_file_path = os.path.join(project_root, "train", "train.txt")
-qdrant_db_path = os.path.join(project_root, "qdrant_db")
 env_path = os.path.join(project_root, ".env")
 
 # Load environment variables
-google_api_key = ""
 if os.path.exists(env_path):
     with open(env_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                if k.strip() in ["GOOGLE_API_KEY", "GEMINI_API_KEY"]:
-                    google_api_key = v.strip()
+                os.environ.setdefault(k.strip(), v.strip())
 
-if not google_api_key:
-    google_api_key = os.getenv("GOOGLE_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")
+google_api_key = os.getenv("GOOGLE_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")
 
 def get_google_embedding(text: str) -> List[float]:
     """Generates embedding vector via Google Gemini API (gemini-embedding-001)"""
@@ -45,7 +41,7 @@ def get_google_embedding(text: str) -> List[float]:
 
 def ingest():
     print("=" * 65)
-    print(f"Ingesting '{train_file_path}' into Qdrant Local Vector DB...")
+    print(f"Ingesting '{train_file_path}' into Qdrant Cloud...")
     print("=" * 65)
 
     if not os.path.exists(train_file_path):
@@ -102,29 +98,41 @@ def ingest():
         }
         points.append(PointStruct(id=point_id, vector=vec, payload=payload))
 
-    # Clear old Qdrant disk cache to ensure 3072 dimension matching
-    import shutil
-    if os.path.exists(qdrant_db_path):
-        try:
-            shutil.rmtree(qdrant_db_path, ignore_errors=True)
-            os.makedirs(qdrant_db_path, exist_ok=True)
-        except Exception as e:
-            print("Warning clearing db directory:", e)
+    # Connect to Qdrant Cloud (cloud-only mode)
+    qdrant_url = (os.getenv("QDRANT_URL") or "").rstrip("/")
+    qdrant_api_key = os.getenv("QDRANT_API_KEY", "")
 
-    # Connect to local Qdrant database
-    client = QdrantClient(path=qdrant_db_path)
+    if not qdrant_url:
+        raise RuntimeError("QDRANT_URL is not set. Add it to .env to connect to Qdrant Cloud.")
+
+    client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key or None, timeout=15)
+    client.get_collections()
+
     vector_dim = len(points[0].vector)
 
-    for col in ["voice_rag", "voice_rag_model"]:
+    # These Gemini embeddings (3072-dim) live in their own collection to keep
+    # the 384-dim 'voice_rag' RAG schema intact on the cloud.
+    collection_name = "voice_rag_model"
+    existing_cols = [c.name for c in client.get_collections().collections]
+    if collection_name in existing_cols:
+        col_info = client.get_collection(collection_name)
+        current_dim = col_info.config.params.vectors.size if hasattr(col_info.config.params.vectors, 'size') else None
+        if current_dim and current_dim != vector_dim:
+            print(f"[Index] Collection '{collection_name}' has dim {current_dim}, recreating with dim {vector_dim}...")
+            client.delete_collection(collection_name)
+            existing_cols.remove(collection_name)
+
+    if collection_name not in existing_cols:
         client.create_collection(
-            collection_name=col,
+            collection_name=collection_name,
             vectors_config=VectorParams(size=vector_dim, distance=Distance.COSINE)
         )
-        client.upsert(collection_name=col, points=points)
-        print(f"[OK] Upserted {len(points)} points into Qdrant collection '{col}'.")
+
+    client.upsert(collection_name=collection_name, points=points)
+    print(f"[OK] Upserted {len(points)} points into Qdrant Cloud collection '{collection_name}'.")
 
     print("\n" + "=" * 65)
-    print("SUCCESS: train.txt data successfully stored into Qdrant Vector DB!")
+    print("SUCCESS: train.txt data successfully stored into Qdrant Cloud!")
     print("=" * 65)
 
 if __name__ == "__main__":

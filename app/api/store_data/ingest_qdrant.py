@@ -18,7 +18,6 @@ if hasattr(sys.stdout, 'reconfigure'):
 # ─────────────────────────────────────────────────────────
 NUM_ROWS = 5
 COLLECTION_NAME = "voice_rag"
-DEFAULT_QDRANT_URL = "http://localhost:6333"
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 env_path = os.path.join(project_root, ".env")
@@ -31,7 +30,7 @@ if os.path.exists(env_path):
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip())
 
-QDRANT_URL = os.getenv("QDRANT_URL", DEFAULT_QDRANT_URL).rstrip("/")
+QDRANT_URL = os.getenv("QDRANT_URL", "").rstrip("/")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
 
 print("=" * 65, flush=True)

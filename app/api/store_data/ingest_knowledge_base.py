@@ -8,6 +8,16 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+env_path = os.path.join(project_root, ".env")
+if os.path.exists(env_path):
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
+
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct
@@ -97,57 +107,34 @@ def ingest_dataset(limit=5000):
     collection_name = "voice_rag"
     vector_dim = len(points[0].vector)
 
-    # 1. Upsert into Server Qdrant
-    qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
+    # Upsert into Qdrant Cloud (cloud-only mode)
+    qdrant_url = (os.getenv("QDRANT_URL") or "").rstrip("/")
     qdrant_api_key = os.getenv("QDRANT_API_KEY", "")
-    try:
-        server_client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, timeout=5)
-        existing_cols = [c.name for c in server_client.get_collections().collections]
-        if collection_name in existing_cols:
-            col_info = server_client.get_collection(collection_name)
-            current_dim = col_info.config.params.vectors.size if hasattr(col_info.config.params.vectors, 'size') else None
-            if current_dim and current_dim != vector_dim:
-                server_client.delete_collection(collection_name)
-                existing_cols.remove(collection_name)
 
-        if collection_name not in existing_cols:
-            server_client.create_collection(
-                collection_name=collection_name,
-                vectors_config=VectorParams(size=vector_dim, distance=Distance.COSINE)
-            )
+    if not qdrant_url:
+        raise RuntimeError("QDRANT_URL is not set. Add it to .env to connect to Qdrant Cloud.")
 
-        # Batch upsert points
-        batch_size = 500
-        for b_start in range(0, len(points), batch_size):
-            server_client.upsert(collection_name=collection_name, points=points[b_start:b_start+batch_size])
-        print(f"[OK] Upserted {len(points)} points into Server Qdrant ('{collection_name}')")
-    except Exception as err:
-        print(f"[Warning] Could not upsert to server Qdrant: {err}")
+    server_client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key or None, timeout=15)
+    server_client.get_collections()
+    existing_cols = [c.name for c in server_client.get_collections().collections]
+    if collection_name in existing_cols:
+        col_info = server_client.get_collection(collection_name)
+        current_dim = col_info.config.params.vectors.size if hasattr(col_info.config.params.vectors, 'size') else None
+        if current_dim and current_dim != vector_dim:
+            print(f"[Index] Collection '{collection_name}' has dim {current_dim}, recreating with dim {vector_dim}...")
+            server_client.delete_collection(collection_name)
+            existing_cols.remove(collection_name)
 
-    # 2. Upsert into Local Disk Qdrant DB
-    local_db_path = os.path.join(project_root, "qdrant_db")
-    try:
-        disk_client = QdrantClient(path=local_db_path)
-        existing_cols = [c.name for c in disk_client.get_collections().collections]
-        if collection_name in existing_cols:
-            col_info = disk_client.get_collection(collection_name)
-            current_dim = col_info.config.params.vectors.size if hasattr(col_info.config.params.vectors, 'size') else None
-            if current_dim and current_dim != vector_dim:
-                disk_client.delete_collection(collection_name)
-                existing_cols.remove(collection_name)
+    if collection_name not in existing_cols:
+        server_client.create_collection(
+            collection_name=collection_name,
+            vectors_config=VectorParams(size=vector_dim, distance=Distance.COSINE)
+        )
 
-        if collection_name not in existing_cols:
-            disk_client.create_collection(
-                collection_name=collection_name,
-                vectors_config=VectorParams(size=vector_dim, distance=Distance.COSINE)
-            )
-
-        batch_size = 500
-        for b_start in range(0, len(points), batch_size):
-            disk_client.upsert(collection_name=collection_name, points=points[b_start:b_start+batch_size])
-        print(f"[OK] Upserted {len(points)} points into Local Disk Qdrant DB at {local_db_path}")
-    except Exception as err:
-        print(f"[Warning] Could not upsert to local disk Qdrant: {err}")
+    batch_size = 500
+    for b_start in range(0, len(points), batch_size):
+        server_client.upsert(collection_name=collection_name, points=points[b_start:b_start+batch_size])
+    print(f"[OK] Upserted {len(points)} points into Qdrant Cloud ('{collection_name}')")
 
     print("=" * 65)
     print(f"SUCCESS: Ingested {len(points)} Q&A knowledge points into Qdrant Vector DB!")

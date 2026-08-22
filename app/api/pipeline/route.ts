@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { search as searchQdrant } from "../qdrant/route";
+import { search as searchQdrant, QdrantSearchResult } from "../qdrant/route";
 import { guardrail } from "../guardrail/route";
 
 export async function POST(request: Request) {
@@ -14,17 +14,17 @@ export async function POST(request: Request) {
     }
 
     let transcript = "";
-    let isJson = false;
     let requestText = "";
 
     try {
       const contentType = request.headers.get("content-type") || "";
       if (contentType.includes("application/json")) {
-        isJson = true;
         const jsonBody = await request.json();
         requestText = (jsonBody.text || jsonBody.transcript || "").trim();
       }
-    } catch (e) {}
+    } catch {
+      // ignore request parsing errors
+    }
 
     if (requestText) {
       transcript = requestText;
@@ -54,12 +54,12 @@ export async function POST(request: Request) {
         const arrayBuffer = await audioFile.arrayBuffer();
         const audioBuffer = Buffer.from(arrayBuffer);
 
-        let sarvamFormData = new FormData();
+        const sarvamFormData = new FormData();
         sarvamFormData.append("file", new Blob([audioBuffer], { type: mimeType }), fileName);
         sarvamFormData.append("model", "saaras:v3");
         sarvamFormData.append("mode", "transcribe");
 
-        let sttResponse = await fetch("https://api.sarvam.ai/speech-to-text", {
+        const sttResponse = await fetch("https://api.sarvam.ai/speech-to-text", {
           method: "POST",
           headers: { "api-subscription-key": sarvamApiKey },
           body: sarvamFormData,
@@ -101,14 +101,16 @@ export async function POST(request: Request) {
       );
     }
 
-    let qdrantDocs: any[] = [];
+    let qdrantDocs: QdrantSearchResult[] = [];
     try {
       const rawDocs = await searchQdrant(transcript, 5);
       if (Array.isArray(rawDocs)) {
         rawDocs.sort((a, b) => b.score - a.score);
         qdrantDocs = rawDocs;
       }
-    } catch (qdrantErr: any) {}
+    } catch {
+      // ignore Qdrant search errors
+    }
 
     let rawAnswerText = "";
 
@@ -176,7 +178,9 @@ export async function POST(request: Request) {
             : `data:audio/wav;base64,${base64Audio}`;
         }
       }
-    } catch (ttsErr) {}
+    } catch {
+      // ignore TTS generation errors
+    }
 
     return NextResponse.json({
       success: true,
@@ -186,10 +190,12 @@ export async function POST(request: Request) {
       textResponse: finalFilteredText,
       audioUrl,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Failed to execute Voice RAG pipeline.";
     return NextResponse.json(
-      { error: error.message || "Failed to execute Voice RAG pipeline." },
+      { error: errorMessage },
       { status: 500 }
     );
   }
 }
+
