@@ -114,24 +114,24 @@ export async function POST(request: Request) {
       console.error("[pipeline] Qdrant retrieval failed:", retrievalError);
     }
 
+    const isKannadaQuery = /[\u0C80-\u0CFF]/.test(transcript);
+    const isKannadaText = (value: unknown): value is string =>
+      typeof value === "string" && /[\u0C80-\u0CFF]/.test(value);
     let rawAnswerText = "";
 
     if (qdrantDocs && qdrantDocs.length > 0) {
       for (const doc of qdrantDocs) {
         const payload = doc.payload || {};
-        const candidates = [
-          payload.Eng_Answer,
-          payload.Answer,
-          payload.text,
-          payload.passage,
-          payload.content,
-        ];
+        const candidates = isKannadaQuery
+          ? [payload.Answer]
+          : [payload.Eng_Answer, payload.Answer, payload.text, payload.passage, payload.content];
         for (const cand of candidates) {
           if (
             cand &&
             typeof cand === "string" &&
             cand.trim() !== "" &&
-            cand.trim() !== "No Answer Present."
+            cand.trim() !== "No Answer Present." &&
+            (!isKannadaQuery || isKannadaText(cand))
           ) {
             rawAnswerText = cand.trim();
             break;
@@ -144,7 +144,9 @@ export async function POST(request: Request) {
     if (!rawAnswerText || rawAnswerText.trim() === "") {
       rawAnswerText = retrievalError
         ? `Knowledge base search is currently unavailable: ${retrievalError}`
-        : `No document in the knowledge base matched your query: "${transcript}".`;
+        : isKannadaQuery
+          ? "ನಿಮ್ಮ ಪ್ರಶ್ನೆಗೆ ಕನ್ನಡದಲ್ಲಿ ಯಾವುದೇ ಉತ್ತರ ಕಂಡುಬಂದಿಲ್ಲ."
+          : `No document in the knowledge base matched your query: "${transcript}".`;
     }
 
     const guardrailResult = await guardrail(rawAnswerText);
@@ -162,7 +164,7 @@ export async function POST(request: Request) {
         },
         body: JSON.stringify({
           inputs: [ttsInputText],
-          target_language_code: "en-IN",
+          target_language_code: isKannadaQuery ? "kn-IN" : "en-IN",
           speaker: "anushka",
           pitch: 0,
           pace: 1.05,
