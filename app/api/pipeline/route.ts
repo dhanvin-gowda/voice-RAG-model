@@ -102,14 +102,16 @@ export async function POST(request: Request) {
     }
 
     let qdrantDocs: QdrantSearchResult[] = [];
+    let retrievalError: string | null = null;
     try {
       const rawDocs = await searchQdrant(transcript, 5);
       if (Array.isArray(rawDocs)) {
         rawDocs.sort((a, b) => b.score - a.score);
         qdrantDocs = rawDocs;
       }
-    } catch {
-      // ignore Qdrant search errors
+    } catch (err: unknown) {
+      retrievalError = err instanceof Error ? err.message : String(err);
+      console.error("[pipeline] Qdrant retrieval failed:", retrievalError);
     }
 
     let rawAnswerText = "";
@@ -140,7 +142,9 @@ export async function POST(request: Request) {
     }
 
     if (!rawAnswerText || rawAnswerText.trim() === "") {
-      rawAnswerText = `No document in the knowledge base matched your query: "${transcript}".`;
+      rawAnswerText = retrievalError
+        ? `Knowledge base search is currently unavailable: ${retrievalError}`
+        : `No document in the knowledge base matched your query: "${transcript}".`;
     }
 
     const guardrailResult = await guardrail(rawAnswerText);
@@ -186,6 +190,14 @@ export async function POST(request: Request) {
       success: true,
       transcript,
       retrievedDocs: qdrantDocs,
+      retrievalError,
+      diagnostics: {
+        hasQdrantUrl: Boolean(process.env.QDRANT_URL),
+        hasQdrantApiKey: Boolean(process.env.QDRANT_API_KEY),
+        hasGoogleApiKey: Boolean(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY),
+        collection: process.env.QDRANT_COLLECTION || "voice_rag_gemini",
+        docCount: qdrantDocs.length,
+      },
       guardrailResult,
       textResponse: finalFilteredText,
       audioUrl,

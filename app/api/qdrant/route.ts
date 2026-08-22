@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { execFile, spawn } from "child_process";
-import path from "path";
+import { sendEmbedding } from "../embed/route";
 
 export interface QdrantSearchResult {
   id: string | number;
@@ -8,94 +7,100 @@ export interface QdrantSearchResult {
   payload?: Record<string, unknown>;
 }
 
-let serviceStarting = false;
-
-function ensureDaemonRunning() {
-  if (serviceStarting) return;
-  serviceStarting = true;
-  const servicePath = path.join(process.cwd(), "app", "api", "store_data", "qdrant_service.py");
-  try {
-    const child = spawn("python", [servicePath], {
-      detached: true,
-      stdio: "ignore",
-    });
-    child.unref();
-  } catch {
-    serviceStarting = false;
-  }
+interface QdrantPoint {
+  id: string | number;
+  score?: number;
+  payload?: Record<string, unknown> | null;
 }
 
-async function searchLocalQdrant(
-  query: string | number[],
+interface QdrantQueryResponse {
+  result?: {
+    points?: QdrantPoint[];
+  };
+  status?: string;
+}
+
+function getQdrantConfig(): { url: string; apiKey: string; collection: string } {
+  const url = (process.env.QDRANT_URL || "").replace(/\/+$/, "");
+  const apiKey = process.env.QDRANT_API_KEY || "";
+  const collection = process.env.QDRANT_COLLECTION || "voice_rag_gemini";
+
+  if (!url) {
+    throw new Error("QDRANT_URL is not set in environment variables.");
+  }
+  if (!apiKey) {
+    throw new Error("QDRANT_API_KEY is not set in environment variables.");
+  }
+
+  return { url, apiKey, collection };
+}
+
+async function searchQdrantCloud(
+  queryVector: number[],
   limit: number,
   collection: string
 ): Promise<QdrantSearchResult[]> {
-  const payload = typeof query === "string" ? { text: query, limit, collection } : { vector: query, limit, collection };
+  const { url, apiKey } = getQdrantConfig();
 
-  // 1. Ultra-fast HTTP Daemon query (~30ms)
-  try {
-    const res = await fetch("http://127.0.0.1:5005/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(3000),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data)) {
-        return data;
-      }
-    }
-  } catch {
-    // Service not running yet, auto-spawn background daemon for subsequent queries
-    ensureDaemonRunning();
+  const res = await fetch(`${url}/collections/${collection}/points/query`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "api-key": apiKey,
+    },
+    body: JSON.stringify({
+      query: queryVector,
+      limit,
+      with_payload: true,
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(
+      `Qdrant search failed (${res.status}) on collection '${collection}': ${errText.slice(0, 300)}`
+    );
   }
 
-  // 2. Cold-start Process Fallback
-  return new Promise((resolve) => {
-    const scriptPath = path.join(process.cwd(), "app", "api", "store_data", "query_qdrant.py");
-    const b64Payload = Buffer.from(JSON.stringify(payload)).toString("base64");
+  const data = (await res.json()) as QdrantQueryResponse;
+  const points = data.result?.points || [];
 
-    execFile(
-      "python",
-      [scriptPath, b64Payload],
-      { maxBuffer: 10 * 1024 * 1024, timeout: 45000, encoding: "utf-8" },
-      (error, stdout) => {
-        if (error) {
-          return resolve([]);
-        }
-        try {
-          const results = JSON.parse(stdout.trim());
-          if (Array.isArray(results)) {
-            return resolve(results);
-          }
-        } catch {
-          // ignore parse errors
-        }
-        resolve([]);
-      }
-    );
-  });
+  return points.map((p) => ({
+    id: p.id,
+    score: typeof p.score === "number" ? p.score : 0,
+    payload: p.payload || {},
+  }));
 }
-
-
 
 export async function search(
   query: string | number[],
   limit: number = 5,
   collection?: string
 ): Promise<QdrantSearchResult[]> {
-  const collectionName = collection || process.env.QDRANT_COLLECTION || "voice_rag";
-  const results = await searchLocalQdrant(query, limit, collectionName);
-  return results;
+  const targetCollection =
+    collection || process.env.QDRANT_COLLECTION || "voice_rag_gemini";
+
+  let vector: number[];
+  if (Array.isArray(query)) {
+    vector = query;
+  } else {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      return [];
+    }
+    vector = await sendEmbedding(trimmed, "RETRIEVAL_QUERY");
+  }
+
+  return searchQdrantCloud(vector, limit, targetCollection);
 }
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json();
-    const queryInput = body.query || body.vector || body.text;
-    const limit = body.limit || body.topK || 5;
-    const collection = body.collection || body.collectionName;
+    const body = await request.json().catch(() => ({}));
+    const queryInput: string | number[] | undefined = body.query || body.vector || body.text;
+    const limit: number = body.limit || body.topK || 5;
+    const collection: string | undefined = body.collection || body.collectionName;
 
     if (!queryInput) {
       return NextResponse.json(
@@ -104,18 +109,45 @@ export async function POST(request: Request) {
       );
     }
 
-    const results = await search(queryInput, limit, collection);
-    return NextResponse.json({
-      success: true,
-      count: results.length,
-      results,
-    });
+    let config: { hasQdrantUrl: boolean; hasQdrantApiKey: boolean; collection: string };
+    try {
+      const cfg = getQdrantConfig();
+      config = {
+        hasQdrantUrl: true,
+        hasQdrantApiKey: true,
+        collection: collection || cfg.collection,
+      };
+    } catch (e: unknown) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: e instanceof Error ? e.message : String(e),
+          results: [],
+          count: 0,
+        },
+        { status: 500 }
+      );
+    }
+
+    try {
+      const results = await search(queryInput, limit, collection);
+      return NextResponse.json({
+        success: true,
+        count: results.length,
+        results,
+      });
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Failed to execute Qdrant vector search.";
+      console.error("[qdrant] Search failed:", errorMessage);
+      return NextResponse.json(
+        { success: false, error: errorMessage, ...config, results: [], count: 0 },
+        { status: 502 }
+      );
+    }
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : "Failed to execute Qdrant vector search.";
-    return NextResponse.json(
-      { error: errorMessage },
-      { status: 500 }
-    );
+    const errorMessage =
+      error instanceof Error ? error.message : "Failed to execute Qdrant vector search.";
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }
-
