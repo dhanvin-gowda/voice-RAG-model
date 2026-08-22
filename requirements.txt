@@ -1,0 +1,5 @@
+datasets>=3.0,<5
+numpy>=1.26,<3
+pyarrow>=15,<22
+qdrant-client>=1.12,<2
+sentence-transformers>=3.0,<6
